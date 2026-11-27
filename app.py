@@ -21,10 +21,7 @@ st.caption("종목 검색 차트(신호 마커 포함)와 '무릎(파랑) 아래
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 BANDS_SPEC = [
-    ("바닥(빨강)", -1.55, "#d62828", 1.3),
-    ("연보라(하)", -1.25, "#cc99ff", 1.1),
-    ("얇은빨강", -0.90, "#ff5555", 1.1),
-    ("연보라(상)", -0.60, "#cc99ff", 1.1),
+    ("바닥(빨강)", -1.55, "#d62828", 1.6),
     ("무릎(파랑)", 0.00, "#0000ff", 2.2),
     ("허벅지(주황)", 0.82, "#ff6600", 2.2),
     ("허리(검정)", 1.66, "#000000", 2.6),
@@ -145,13 +142,9 @@ def analyze_single_stock(item):
             return None
 
         if cur_p <= float(last["바닥(빨강)"]):
-            stage = "바닥(빨강) 이하"
-        elif cur_p <= float(last["얇은빨강"]):
-            stage = "얇은빨강~바닥"
-        elif cur_p <= float(last["연보라(상)"]):
-            stage = "연보라~얇은빨강"
+            stage = "바닥 이하"
         else:
-            stage = "무릎~연보라(상)"
+            stage = "바닥~무릎"
 
         # Check 1-year (250 trading days) high and which band it reached at that peak
         recent = df.tail(250)
@@ -252,16 +245,6 @@ with tab_chart:
                     ),
                     row=1, col=1,
                 )
-
-                for n, col in [(40, "#cc66cc"), (50, "#e6a800"), (60, "#22aa55"), (120, "#666699")]:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=view["date_str"], y=view[f"sma_{n}"],
-                            mode="lines", line=dict(color=col, width=1),
-                            name=f"MA{n}", opacity=0.75,
-                        ),
-                        row=1, col=1,
-                    )
 
                 for b_name, _, col, lw in BANDS_SPEC:
                     fig.add_trace(
