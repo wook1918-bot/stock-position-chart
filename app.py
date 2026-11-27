@@ -96,7 +96,7 @@ def compute_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     log_c = np.log(df["close"].replace(0, np.nan))
     gma = np.exp(log_c.ewm(span=n_band, adjust=False).mean())
     ann_vol = (log_c.diff().rolling(n_vol).std() * ann_factor).fillna(0.55)
-    eff_sig = np.clip(0.36 + 0.18 * ann_vol, 0.42, 0.58)
+    eff_sig = np.clip(0.30 + 0.25 * ann_vol, 0.35, 0.58)
 
     for name, z, _, _ in BANDS_SPEC:
         df[name] = gma * np.exp(z * eff_sig)
