@@ -16,14 +16,15 @@ st.set_page_config(
 )
 
 st.title("📊 주가위치분석시스템 차트 (KRX)")
-st.caption("종목 검색 차트와 '무릎(파랑) 아래' 저위치 종목 스캐너를 제공합니다.")
+st.caption("종목 검색 차트(신호 마커 포함)와 '무릎(파랑) 아래' 저위치 종목 스캐너를 제공합니다.")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 BANDS_SPEC = [
-    ("연보라(하)", -1.28, "#cc99ff", 1.2),
-    ("얇은빨강", -0.90, "#ff5555", 1.2),
-    ("연보라(상)", -0.60, "#cc99ff", 1.2),
+    ("바닥(빨강)", -1.55, "#d62828", 1.3),
+    ("연보라(하)", -1.25, "#cc99ff", 1.1),
+    ("얇은빨강", -0.90, "#ff5555", 1.1),
+    ("연보라(상)", -0.60, "#cc99ff", 1.1),
     ("무릎(파랑)", 0.00, "#0000ff", 2.2),
     ("허벅지(주황)", 0.82, "#ff6600", 2.2),
     ("허리(검정)", 1.66, "#000000", 2.6),
@@ -94,9 +95,9 @@ def compute_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     n_band = 300 if timeframe == "day" else 100
     n_band = min(n_band, max(60, len(df) // 2))
     log_c = np.log(df["close"].replace(0, np.nan))
-    gma = np.exp(log_c.rolling(n_band).mean())
+    gma = np.exp(log_c.rolling(n_band).mean()) * 1.06
     lstd = log_c.rolling(n_band).std()
-    eff_sig = 0.25 + 0.50 * lstd
+    eff_sig = 0.34 + 0.30 * lstd
 
     for name, z, _, _ in BANDS_SPEC:
         df[name] = gma * np.exp(z * eff_sig)
@@ -126,35 +127,42 @@ def fetch_top_market_stocks(market: str = "ALL", pages_per_market: int = 2):
 def analyze_single_stock(item):
     code, name, m_name = item
     try:
-        df = fetch_ohlcv(code, "day", years=2)
-        if df.empty or len(df) < 310:
+        df = fetch_ohlcv(code, "day", years=3)
+        if df.empty or len(df) < 320:
             return None
-        log_c = np.log(df["close"].replace(0, np.nan))
-        w = log_c.tail(300)
-        gma = float(np.exp(w.mean()))
-        lstd = float(w.std())
-        eff_sig = 0.25 + 0.50 * lstd
+        df = compute_indicators(df, "day")
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
 
-        cur_p = float(df["close"].iloc[-1])
-        prev_p = float(df["close"].iloc[-2])
+        cur_p = float(last["close"])
+        prev_p = float(prev["close"])
         chg = (cur_p - prev_p) / prev_p * 100.0
 
-        knee = gma
-        purple_hi = gma * np.exp(-0.60 * eff_sig)
-        thin_red = gma * np.exp(-0.90 * eff_sig)
-        purple_lo = gma * np.exp(-1.28 * eff_sig)
-
-        if cur_p > knee:
+        knee = float(last["무릎(파랑)"])
+        if np.isnan(knee) or cur_p > knee:
             return None
 
-        if cur_p <= purple_lo:
-            stage = "연보라(하) 이하"
-        elif cur_p <= thin_red:
-            stage = "얇은빨강~연보라(하)"
-        elif cur_p <= purple_hi:
-            stage = "연보라(상)~얇은빨강"
+        if cur_p <= float(last["바닥(빨강)"]):
+            stage = "바닥(빨강) 이하"
+        elif cur_p <= float(last["얇은빨강"]):
+            stage = "얇은빨강~바닥"
+        elif cur_p <= float(last["연보라(상)"]):
+            stage = "연보라~얇은빨강"
         else:
             stage = "무릎~연보라(상)"
+
+        # Check 1-year (250 trading days) high and which band it reached at that peak
+        recent = df.tail(250)
+        peak_idx = recent["high"].idxmax()
+        peak_row = recent.loc[peak_idx]
+        peak_p = float(peak_row["high"])
+        drawdown_pct = (cur_p - peak_p) / peak_p * 100.0
+
+        peak_zone = "무릎 아래"
+        for b_name in ["무릎(파랑)", "허벅지(주황)", "허리(검정)", "어깨(초록)", "상투(빨강)"]:
+            b_val = float(peak_row[b_name])
+            if not np.isnan(b_val) and peak_p >= b_val:
+                peak_zone = f"{b_name.split('(')[0]} 이상"
 
         knee_gap = (cur_p - knee) / knee * 100.0
         return {
@@ -166,13 +174,15 @@ def analyze_single_stock(item):
             "무릎(파랑)": int(knee),
             "무릎 대비(%)": round(knee_gap, 1),
             "현재 구간": stage,
+            "1년 고점 위치": peak_zone,
+            "고점 대비(%)": round(drawdown_pct, 1),
         }
     except Exception:
         return None
 
 
 if "selected_query" not in st.session_state:
-    st.session_state["selected_query"] = "삼성전자"
+    st.session_state["selected_query"] = "신세계"
 
 
 def set_selected_stock(stock_name: str):
@@ -184,7 +194,7 @@ with st.sidebar:
     query = st.text_input(
         "종목명 또는 종목코드",
         key="selected_query",
-        placeholder="예: 삼성전자, 세방전지, 005930",
+        placeholder="예: 삼성전자, 신세계, 004170",
     )
     tf_label = st.radio("봉 구분", ["일봉", "주봉"], horizontal=True)
     timeframe = "day" if tf_label == "일봉" else "week"
@@ -213,7 +223,7 @@ with tab_chart:
                 chg = (last["close"] - prev["close"]) / prev["close"] * 100.0
 
                 cur_p = last["close"]
-                zone = "연보라(하) 이하"
+                zone = "바닥(빨강) 이하"
                 for b_name, _, _, _ in BANDS_SPEC:
                     if pd.notna(last[b_name]) and cur_p >= last[b_name]:
                         zone = f"{b_name} 이상"
@@ -246,7 +256,7 @@ with tab_chart:
                         go.Scatter(
                             x=view["date_str"], y=view[f"sma_{n}"],
                             mode="lines", line=dict(color=col, width=1),
-                            name=f"MA{n}", opacity=0.8,
+                            name=f"MA{n}", opacity=0.75,
                         ),
                         row=1, col=1,
                     )
@@ -257,6 +267,33 @@ with tab_chart:
                             x=view["date_str"], y=view[b_name],
                             mode="lines", line=dict(color=col, width=lw),
                             name=b_name,
+                        ),
+                        row=1, col=1,
+                    )
+
+                # Signal markers: Knee breakout & Top (Sangtoo) overheat
+                knee_cross = (view["close"].shift(1) < view["무릎(파랑)"].shift(1)) & (view["close"] >= view["무릎(파랑)"])
+                if knee_cross.any():
+                    pts = view[knee_cross]
+                    fig.add_trace(
+                        go.Scatter(
+                            x=pts["date_str"], y=pts["low"] * 0.95,
+                            mode="markers",
+                            marker=dict(symbol="triangle-up", size=10, color="#ff0000"),
+                            name="무릎통과신호",
+                        ),
+                        row=1, col=1,
+                    )
+
+                top_cross = (view["high"] >= view["상투(빨강)"])
+                if top_cross.any():
+                    pts = view[top_cross]
+                    fig.add_trace(
+                        go.Scatter(
+                            x=pts["date_str"], y=pts["high"] * 1.05,
+                            mode="markers",
+                            marker=dict(symbol="triangle-down", size=10, color="#0000ff"),
+                            name="상투신호",
                         ),
                         row=1, col=1,
                     )
@@ -305,13 +342,15 @@ with tab_chart:
 
 with tab_scan:
     st.subheader("🔍 현재가 ≤ 무릎(파랑) 종목 스캐너 (일봉 기준)")
-    st.caption("시가총액 상위 종목 중 현재 주가가 무릎(파랑) 선 아래로 내려온 종목을 찾아 무릎 대비 괴리율 순으로 정렬합니다.")
+    st.caption("시가총액 상위 종목 중 현재 주가가 무릎(파랑) 선 아래에 있는 종목을 찾고, 최근 1년 고점 위치와 고점 대비 하락률까지 함께 표시합니다.")
 
-    col_m, col_n, col_btn = st.columns([2, 2, 1.5])
+    col_m, col_n, col_f, col_btn = st.columns([1.6, 1.6, 2.0, 1.3])
     with col_m:
         market_opt = st.selectbox("대상 시장", ["ALL (코스피+코스닥)", "KOSPI", "KOSDAQ"])
     with col_n:
-        pages_opt = st.selectbox("스캔 범위 (시장별 시총 상위)", [1, 2, 3], index=1, format_func=lambda p: f"상위 {p * 50}종목씩")
+        pages_opt = st.selectbox("스캔 범위", [1, 2, 3], index=1, format_func=lambda p: f"시장별 상위 {p * 50}종목")
+    with col_f:
+        filter_opt = st.selectbox("필터 조건", ["무릎 아래 전체", "허리·어깨 이상 찍고 무릎 아래 하락"])
     with col_btn:
         st.write("")
         st.write("")
@@ -340,10 +379,13 @@ with tab_scan:
     if "scan_results" in st.session_state:
         res_df = st.session_state["scan_results"]
         total_cnt = st.session_state.get("scan_total", 0)
+        if not res_df.empty and filter_opt == "허리·어깨 이상 찍고 무릎 아래 하락":
+            res_df = res_df[res_df["1년 고점 위치"].isin(["허리 이상", "어깨 이상", "상투 이상"])].reset_index(drop=True)
+
         if res_df.empty:
-            st.info(f"스캔한 {total_cnt}개 종목 중 무릎(파랑) 아래에 있는 종목이 없습니다.")
+            st.info(f"스캔한 {total_cnt}개 종목 중 해당 조건에 맞는 종목이 없습니다.")
         else:
-            st.success(f"총 {total_cnt}개 종목 중 **{len(res_df)}개**가 무릎(파랑) 아래에 있습니다. (왼쪽 '종목명 또는 종목코드'에 입력하면 바로 차트를 볼 수 있어요!)")
+            st.success(f"총 {total_cnt}개 종목 중 조건에 맞는 **{len(res_df)}개** 종목을 찾았습니다.")
             st.dataframe(res_df, use_container_width=True, hide_index=True)
 
             pick = st.selectbox("바로 차트로 볼 종목 선택", res_df["종목명"].tolist())
