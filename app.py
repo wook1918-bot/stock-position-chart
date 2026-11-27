@@ -92,12 +92,14 @@ def compute_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     df["slow_k"] = pd.Series(fast_k).rolling(5).mean()
     df["slow_d"] = df["slow_k"].rolling(5).mean()
 
-    n_band = 300 if timeframe == "day" else 100
-    n_band = min(n_band, max(60, len(df) // 2))
+    n_band = 260 if timeframe == "day" else 60
+    n_vol = 250 if timeframe == "day" else 52
+    ann_factor = np.sqrt(250) if timeframe == "day" else np.sqrt(52)
+
     log_c = np.log(df["close"].replace(0, np.nan))
-    gma = np.exp(log_c.rolling(n_band).mean()) * 1.06
-    lstd = log_c.rolling(n_band).std()
-    eff_sig = 0.34 + 0.30 * lstd
+    gma = np.exp(log_c.ewm(span=n_band, adjust=False).mean())
+    ann_vol = (log_c.diff().rolling(n_vol).std() * ann_factor).fillna(0.55)
+    eff_sig = np.clip(0.36 + 0.18 * ann_vol, 0.42, 0.58)
 
     for name, z, _, _ in BANDS_SPEC:
         df[name] = gma * np.exp(z * eff_sig)
