@@ -195,6 +195,7 @@ with st.sidebar:
     timeframe = "day" if tf_label == "일봉" else "week"
     bars = st.slider("표시 봉수", min_value=120, max_value=500, value=300, step=20)
     use_log = st.checkbox("로그 스케일", value=True)
+    allow_zoom = st.checkbox("차트 드래그/확대 켜기 (모바일 스크롤 시 끄기 권장)", value=False)
     st.markdown("---")
     st.caption("※ 본 차트와 스캐너는 공개된 블로그 차트 패턴을 역산·재현한 참고용 지표이며 투자 권유가 아닙니다.")
 
@@ -227,6 +228,8 @@ with tab_chart:
                 c1.metric(f"{name} ({code})", f"{int(cur_p):,}원", f"{chg:+.2f}%")
                 c2.metric("현재 추정 위치", zone)
                 c3.metric("기준일", last["date_str"])
+
+                st.markdown("[⬇️ 아래 단계별 가격표로 바로 이동](#price-table)")
 
                 fig = make_subplots(
                     rows=3, cols=1, shared_xaxes=True,
@@ -299,19 +302,58 @@ with tab_chart:
                 )
 
                 fig.update_layout(
-                    height=780,
+                    height=680,
                     xaxis_rangeslider_visible=False,
                     hovermode="x unified",
+                    dragmode="zoom" if allow_zoom else False,
                     legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
-                    margin=dict(l=10, r=20, t=40, b=20),
+                    margin=dict(l=15, r=65, t=40, b=20),
                 )
+                if not allow_zoom:
+                    fig.update_xaxes(fixedrange=True)
+                    fig.update_yaxes(fixedrange=True)
                 if use_log:
-                    fig.update_yaxes(type="log", row=1, col=1)
+                    y_min = float(min(view["low"].min(), view["바닥(빨강)"].min())) * 0.9
+                    y_max = float(max(view["high"].max(), view["상투(빨강)"].max())) * 1.1
+                    cand_ticks = []
+                    for exp in range(2, 8):
+                        base = 10 ** exp
+                        for mult in [1, 1.5, 2, 3, 4, 5, 7, 8]:
+                            v = int(base * mult)
+                            if y_min <= v <= y_max:
+                                cand_ticks.append(v)
+                    fig.update_yaxes(
+                        type="log",
+                        tickvals=cand_ticks,
+                        ticktext=[f"{v:,}" for v in cand_ticks],
+                        showgrid=True,
+                        gridcolor="#e5e5e5",
+                        row=1, col=1,
+                    )
+                else:
+                    fig.update_yaxes(
+                        tickformat=",",
+                        showgrid=True,
+                        gridcolor="#e5e5e5",
+                        row=1, col=1,
+                    )
+                fig.add_hline(
+                    y=cur_p, line_dash="dot", line_color="#d62828", line_width=1,
+                    annotation_text=f" {int(cur_p):,}원",
+                    annotation_position="right",
+                    annotation_font_color="#d62828",
+                    row=1, col=1,
+                )
                 fig.update_yaxes(range=[0, 100], row=2, col=1)
                 fig.update_xaxes(type="category", nticks=8, row=3, col=1)
 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    config={"scrollZoom": allow_zoom, "displayModeBar": allow_zoom},
+                )
 
+                st.markdown('<div id="price-table"></div>', unsafe_allow_html=True)
                 st.subheader("단계별 가격표 (최신 기준)")
                 table_rows = []
                 for b_name, _, _, _ in reversed(BANDS_SPEC):
