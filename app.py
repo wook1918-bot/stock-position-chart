@@ -174,15 +174,18 @@ def analyze_single_stock(item):
 if "selected_query" not in st.session_state:
     st.session_state["selected_query"] = "삼성전자"
 
+
+def set_selected_stock(stock_name: str):
+    st.session_state["selected_query"] = stock_name
+
+
 with st.sidebar:
     st.header("조회 설정")
     query = st.text_input(
         "종목명 또는 종목코드",
-        value=st.session_state["selected_query"],
+        key="selected_query",
         placeholder="예: 삼성전자, 세방전지, 005930",
     )
-    if query != st.session_state["selected_query"]:
-        st.session_state["selected_query"] = query
     tf_label = st.radio("봉 구분", ["일봉", "주봉"], horizontal=True)
     timeframe = "day" if tf_label == "일봉" else "week"
     bars = st.slider("표시 봉수", min_value=120, max_value=500, value=300, step=20)
@@ -344,6 +347,4 @@ with tab_scan:
             st.dataframe(res_df, use_container_width=True, hide_index=True)
 
             pick = st.selectbox("바로 차트로 볼 종목 선택", res_df["종목명"].tolist())
-            if st.button("선택 종목 차트 열기"):
-                st.session_state["selected_query"] = pick
-                st.rerun()
+            st.button("선택 종목 차트 열기", on_click=set_selected_stock, args=(pick,))
