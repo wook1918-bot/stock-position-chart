@@ -19,7 +19,7 @@ st.title("📊 주가위치분석시스템 차트 (KRX)")
 st.caption(
     "종목·지수 검색 차트(신호 마커 포함)와 '무릎(파랑) 아래' 저위치 종목 스캐너를 제공합니다. "
     "기준선은 고가 120일·650일 이동평균을 혼합(0.3/0.7)한 값이며, 단계는 댕기왕자 블로그 차트 대조로 "
-    "역산한 비율(발목 0.20 ~ 상투 4.16)을 씁니다."
+    "역산한 비율(바닥 0.20 ~ 상투 4.16)을 씁니다."
 )
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -28,8 +28,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 # 댕기왕자 블로그 차트 34개 지점(12종목) 대조로 역산한 계수.
 # 중심선(무릎)에서 변동성 s배 만큼 exp(z*s) 만큼 떨어진 위치.
 BAND_Z = [
-    ("발목(보라)", -1.62, "#7a3fa8", 1.4, "dot"),
-    ("바닥(빨강)", -1.10, "#d62828", 1.6, "solid"),
+    ("바닥(빨강)", -1.62, "#d62828", 1.6, "solid"),
+    ("발목(보라)", -1.10, "#7a3fa8", 1.4, "dot"),
     ("무릎(파랑)", 0.00, "#0000ff", 2.4, "solid"),
     ("허벅지(주황)", 0.82, "#ff6600", 2.2, "solid"),
     ("허리(검정)", 1.66, "#000000", 2.4, "solid"),
@@ -37,7 +37,7 @@ BAND_Z = [
     ("상투(빨강)", 2.85, "#ff0000", 2.4, "solid"),
 ]
 BAND_NAMES = [b[0] for b in BAND_Z]
-PRICE_BANDS = ["바닥(빨강)", "무릎(파랑)", "허벅지(주황)", "허리(검정)", "어깨(초록)", "상투(빨강)"]
+PRICE_BANDS = ["바닥(빨강)", "발목(보라)", "무릎(파랑)", "허벅지(주황)", "허리(검정)", "어깨(초록)", "상투(빨강)"]
 
 BASE_SCALE = 1.05          # 기준선 보정 계수
 BASE_SHORT, BASE_LONG = 120, 650
@@ -468,7 +468,7 @@ with tab_chart:
                 chg = (last["close"] - prev["close"]) / prev["close"] * 100.0
 
                 cur_p = last["close"]
-                zone = "발목(보라) 이하"
+                zone = "바닥(빨강) 이하"
                 for b_name, _, _, _, _ in BAND_Z:
                     if pd.notna(last[b_name]) and cur_p >= last[b_name]:
                         zone = f"{b_name} 이상"
@@ -562,7 +562,7 @@ with tab_chart:
                     fig.update_xaxes(fixedrange=True)
                     fig.update_yaxes(fixedrange=True)
                 if use_log:
-                    y_min = float(min(view["low"].min(), view["발목(보라)"].min())) * 0.9
+                    y_min = float(min(view["low"].min(), view["바닥(빨강)"].min())) * 0.9
                     y_max = float(max(view["high"].max(), view["상투(빨강)"].max())) * 1.1
                     cand_ticks = []
                     for exp in range(2, 8):
