@@ -182,6 +182,192 @@ def fetch_top_market_stocks(market: str = "ALL", pages_per_market: int = 2):
     return stocks
 
 
+# ── 연간 실적·밸류에이션 ──────────────────────────────────────────────
+# 네이버 증권 연간 실적 API의 rowList를 표시용·계산용으로 파싱한다.
+# 단위: 매출액·영업이익·당기순이익 억원 / EPS·BPS·주당배당금 원 / 비율 % / PER·PBR 배
+_FIN_ROWS = [
+    ("매출액", "매출액(억원)", "{:,.0f}"),
+    ("영업이익", "영업이익(억원)", "{:,.0f}"),
+    ("영업이익률", "영업이익률(%)", "{:.2f}"),
+    ("당기순이익", "당기순이익(억원)", "{:,.0f}"),
+    ("ROE", "ROE(%)", "{:.2f}"),
+    ("부채비율", "부채비율(%)", "{:.2f}"),
+    ("EPS", "EPS(원)", "{:,.0f}"),
+    ("PER", "PER(배)", "{:.2f}"),
+    ("BPS", "BPS(원)", "{:,.0f}"),
+    ("PBR", "PBR(배)", "{:.2f}"),
+    ("주당배당금", "주당배당금(원)", "{:,.0f}"),
+]
+
+
+def _to_num(cell: dict) -> float:
+    """API 셀값('1,234' / '-' / cx='minus')을 float로 변환. 없으면 NaN."""
+    if not isinstance(cell, dict):
+        return np.nan
+    s = str(cell.get("value", "")).strip().replace(",", "")
+    if s in ("", "-", "N/A", "None"):
+        return np.nan
+    try:
+        v = float(s)
+    except ValueError:
+        return np.nan
+    if cell.get("cx") == "minus" and v > 0:
+        v = -v
+    return v
+
+
+@st.cache_data(ttl=3600)
+def fetch_finance_summary(code: str) -> dict:
+    """네이버 증권 연간 실적·밸류에이션 요약.
+
+    지수(KOSPI/KOSDAQ)나 실적 미제공 종목은 빈 딕셔너리를 돌려준다(예외 없음).
+    반환: table(표시용 DataFrame), raw(지표별 연도 값), labels, eps_options,
+          eps/per/pbr/roe/op/revenue/op_margin(최근 실제 연도), eps_consensus/per_consensus
+    """
+    if not code or is_index(code):
+        return {}
+    try:
+        url = f"https://m.stock.naver.com/api/stock/{code}/finance/annual"
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+    except Exception:
+        return {}
+
+    fi = data.get("financeInfo") or {}
+    cols = fi.get("trTitleList") or []
+    if not cols:
+        return {}
+
+    # 컬럼 순서는 trTitleList 순서를 따른다(JSON의 columns 딕셔너리 순서는 연도순이 아님).
+    keys, labels, is_actual = [], [], []
+    for c in cols:
+        k = str(c.get("key") or "").strip()
+        if not k:
+            continue
+        title = str(c.get("title") or k).replace(".", "").strip()
+        year = title[:4] if title[:4].isdigit() else title
+        consensus = str(c.get("isConsensus", "N")).upper() == "Y"
+        keys.append(k)
+        labels.append(f"{year}(E)" if consensus else year)
+        is_actual.append(not consensus)
+    if not keys:
+        return {}
+
+    row_map = {r.get("title"): (r.get("columns") or {}) for r in (fi.get("rowList") or [])}
+    raw = {}
+    for title, _, _ in _FIN_ROWS:
+        cells = row_map.get(title) or {}
+        raw[title] = [_to_num(cells.get(k)) for k in keys]
+
+    table = pd.DataFrame(
+        {
+            label: ["-" if np.isnan(v) else fmt.format(v) for v in raw[title]]
+            for title, label, fmt in _FIN_ROWS
+        },
+        index=labels,
+    ).T
+
+    n = len(labels)
+    actual_with_eps = [i for i in range(n) if is_actual[i] and not np.isnan(raw["EPS"][i])]
+    if actual_with_eps:
+        latest_i = actual_with_eps[-1]
+    else:
+        cand = [
+            i for i in range(n)
+            if is_actual[i] and (not np.isnan(raw["영업이익"][i]) or not np.isnan(raw["PER"][i]))
+        ]
+        latest_i = cand[-1] if cand else None
+    cons_with_eps = [i for i in range(n) if not is_actual[i] and not np.isnan(raw["EPS"][i])]
+    cons_i = cons_with_eps[-1] if cons_with_eps else None
+
+    def pick(title: str, i):
+        if i is None:
+            return np.nan
+        v = raw[title][i]
+        return np.nan if np.isnan(v) else float(v)
+
+    eps_options = []
+    for i in range(n):
+        e = raw["EPS"][i]
+        if np.isnan(e) or e == 0:
+            continue
+        tag = "예상" if not is_actual[i] else "실적"
+        eps_options.append({"label": f"{labels[i]} {tag}", "eps": float(e), "idx": i})
+    default_opt = 0
+    for pos, opt in enumerate(eps_options):
+        if latest_i is not None and opt["idx"] == latest_i:
+            default_opt = pos
+
+    return {
+        "labels": labels,
+        "table": table,
+        "raw": raw,
+        "latest_label": labels[latest_i] if latest_i is not None else "-",
+        "eps": pick("EPS", latest_i),
+        "per": pick("PER", latest_i),
+        "pbr": pick("PBR", latest_i),
+        "roe": pick("ROE", latest_i),
+        "op": pick("영업이익", latest_i),
+        "revenue": pick("매출액", latest_i),
+        "op_margin": pick("영업이익률", latest_i),
+        "debt_ratio": pick("부채비율", latest_i),
+        "eps_options": eps_options,
+        "default_eps_option": default_opt,
+        "consensus_label": labels[cons_i] if cons_i is not None else None,
+        "eps_consensus": pick("EPS", cons_i),
+        "per_consensus": pick("PER", cons_i),
+    }
+
+
+def describe_price_zone(price: float, row) -> str:
+    """가격이 차트의 어느 단계 사이에 있는지 문장으로 돌려준다."""
+    if price is None or (isinstance(price, float) and np.isnan(price)):
+        return "-"
+    bands = [
+        (name.split("(")[0], float(row[name]))
+        for name, _, _, _, _ in BAND_Z
+        if name in row.index and pd.notna(row[name])
+    ]
+    if not bands:
+        return "-"
+    if price < bands[0][1]:
+        return f"{bands[0][0]} 이하"
+    label = f"{bands[0][0]} 이하"
+    for i, (nm, v) in enumerate(bands):
+        if price >= v:
+            label = f"{nm} ~ {bands[i + 1][0]} 사이" if i + 1 < len(bands) else f"{nm} 이상"
+    return label
+
+
+def enrich_scan_with_finance(rows: list):
+    """무릎 아래로 걸러진 종목에만 연간 실적을 병렬 조회해 컬럼을 붙인다."""
+    if not rows:
+        return rows
+    fin_map = {}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = {ex.submit(fetch_finance_summary, r["코드"]): r["코드"] for r in rows}
+        for f in as_completed(futures):
+            c = futures[f]
+            try:
+                fin_map[c] = f.result() or {}
+            except Exception:
+                fin_map[c] = {}
+
+    for r in rows:
+        fin = fin_map.get(r["코드"]) or {}
+        eps = fin.get("eps", np.nan)
+        op = fin.get("op", np.nan)
+        roe = fin.get("roe", np.nan)
+        cur_p = float(r["현재가"])
+        r["영업이익(억)"] = None if pd.isna(op) else int(round(op))
+        r["PER"] = round(cur_p / eps, 1) if pd.notna(eps) and eps > 0 else None
+        r["ROE(%)"] = None if pd.isna(roe) else round(float(roe), 1)
+        r["실적연도"] = fin.get("latest_label", "-") if fin else "-"
+    return rows
+
+
 def analyze_single_stock(item):
     code, name, m_name = item
     try:
@@ -435,9 +621,79 @@ with tab_chart:
                     f"(허리·어깨·상투는 기준선의 약 2.07·2.74·4.16배)"
                 )
 
+                # ── 연간 실적 및 밸류에이션 ─────────────────────────────
+                fin = {} if idx_flag else fetch_finance_summary(code)
+                if fin:
+                    st.subheader("📊 연간 실적 및 밸류에이션")
+                    st.dataframe(fin["table"], use_container_width=True)
+                    st.caption(
+                        "단위: 매출액·영업이익·당기순이익 억원, EPS·BPS·주당배당금 원, 비율 %. "
+                        "출처: 네이버 증권 연간 실적. (E)는 증권가 예상(컨센서스) 값입니다."
+                    )
+
+                    # ── 목표 PER 적정주가 계산기 ─────────────────────────
+                    st.subheader("🎯 목표 PER 적정주가 계산기")
+                    opts = fin["eps_options"]
+                    if not opts:
+                        st.info("EPS 데이터가 없어 적정주가를 계산할 수 없습니다.")
+                    else:
+                        c_eps, c_per = st.columns([2, 1])
+                        with c_eps:
+                            sel_idx = st.selectbox(
+                                "기준 EPS",
+                                options=list(range(len(opts))),
+                                index=fin["default_eps_option"],
+                                format_func=lambda i: f"{opts[i]['label']} · EPS {opts[i]['eps']:,.0f}원",
+                            )
+                        with c_per:
+                            per_now = fin["per"]
+                            if pd.notna(per_now) and per_now > 0:
+                                per_default = float(min(max(round(float(per_now)), 1), 200))
+                            else:
+                                per_default = 10.0
+                            target_per = st.number_input(
+                                "목표 PER(배)",
+                                min_value=0.1,
+                                max_value=200.0,
+                                value=per_default,
+                                step=0.5,
+                            )
+
+                        eps_sel = float(opts[sel_idx]["eps"])
+                        fair = eps_sel * target_per
+                        upside = (fair - cur_p) / cur_p * 100.0
+                        fair_zone = describe_price_zone(fair, last)
+
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("적정주가", fmt_price(fair, idx_flag), f"{upside:+.1f}% (현재가 대비)")
+                        m2.metric("계산식", f"{eps_sel:,.0f}원 × {target_per:g}배")
+                        m3.metric("차트상 위치", fair_zone)
+
+                        knee_now = float(last["무릎(파랑)"]) if pd.notna(last["무릎(파랑)"]) else np.nan
+                        knee_txt = (
+                            f"무릎(파랑) 대비 {(fair - knee_now) / knee_now * 100:+.1f}%"
+                            if pd.notna(knee_now) and knee_now
+                            else "-"
+                        )
+                        cur_per_txt = f"{cur_p / eps_sel:.2f}배" if eps_sel else "-"
+                        st.caption(
+                            f"현재가 {fmt_price(cur_p, idx_flag)} ÷ 기준 EPS {eps_sel:,.0f}원 = PER {cur_per_txt} · "
+                            f"적정주가 {fmt_price(fair, idx_flag)}은 {knee_txt} 지점입니다. "
+                            f"목표 PER을 바꾸면 적정주가와 상승여력이 바로 갱신됩니다."
+                        )
+                        st.caption(
+                            "※ 적정주가는 목표 PER 가정에 따른 참고치이며 투자 권유가 아닙니다. "
+                            "EPS가 마이너스인 기업은 계산값이 의미를 갖지 않습니다."
+                        )
+                elif not idx_flag:
+                    st.info("이 종목의 연간 실적 데이터를 네이버 증권에서 가져오지 못했습니다.")
+
 with tab_scan:
     st.subheader("🔍 현재가 ≤ 무릎(파랑) 종목 스캐너 (일봉 기준)")
-    st.caption("시가총액 상위 종목 중 현재 주가가 무릎(파랑) 선 아래에 있는 종목을 찾고, 최근 1년 고점 위치와 고점 대비 하락률까지 함께 표시합니다.")
+    st.caption(
+        "시가총액 상위 종목 중 현재 주가가 무릎(파랑) 선 아래에 있는 종목을 찾고, 최근 1년 고점 위치와 고점 대비 하락률, "
+        "그 종목의 연간 실적(영업이익·PER·ROE)까지 함께 표시합니다. PER은 현재가 ÷ 최근 연간 EPS입니다."
+    )
 
     col_m, col_n, col_f, col_btn = st.columns([1.6, 1.6, 2.0, 1.3])
     with col_m:
@@ -451,6 +707,12 @@ with tab_scan:
         st.write("")
         run_scan = st.button("스캔 시작", type="primary", use_container_width=True)
 
+    col_p, col_r = st.columns([1.6, 1.6])
+    with col_p:
+        only_profit = st.checkbox("흑자 기업만 보기 (최근 영업이익 > 0)", value=False)
+    with col_r:
+        per_opt = st.selectbox("PER 조건", ["전체", "PER ≤ 15", "PER ≤ 10"])
+
     market_key = market_opt.split()[0]
 
     if run_scan:
@@ -463,19 +725,37 @@ with tab_scan:
                     res = f.result()
                     if res is not None:
                         found.append(res)
-            if found:
-                res_df = pd.DataFrame(found).sort_values("무릎 대비(%)", ascending=True).reset_index(drop=True)
-                st.session_state["scan_results"] = res_df
-                st.session_state["scan_total"] = len(stock_list)
-            else:
-                st.session_state["scan_results"] = pd.DataFrame()
-                st.session_state["scan_total"] = len(stock_list)
+        if found:
+            with st.spinner(f"무릎 아래 {len(found)}개 종목의 연간 실적을 병렬 조회하는 중..."):
+                found = enrich_scan_with_finance(found)
+
+        if found:
+            res_df = pd.DataFrame(found)
+            col_order = [
+                "종목명", "코드", "시장", "현재가", "등락률(%)", "무릎(파랑)", "무릎 대비(%)",
+                "영업이익(억)", "PER", "ROE(%)", "실적연도",
+                "현재 구간", "1년 고점 위치", "고점 대비(%)",
+            ]
+            res_df = res_df[[c for c in col_order if c in res_df.columns]]
+            res_df = res_df.sort_values("무릎 대비(%)", ascending=True).reset_index(drop=True)
+            st.session_state["scan_results"] = res_df
+            st.session_state["scan_total"] = len(stock_list)
+        else:
+            st.session_state["scan_results"] = pd.DataFrame()
+            st.session_state["scan_total"] = len(stock_list)
 
     if "scan_results" in st.session_state:
         res_df = st.session_state["scan_results"]
         total_cnt = st.session_state.get("scan_total", 0)
         if not res_df.empty and filter_opt == "허리·어깨 이상 찍고 무릎 아래 하락":
             res_df = res_df[res_df["1년 고점 위치"].isin(["허리 이상", "어깨 이상", "상투 이상"])].reset_index(drop=True)
+        if not res_df.empty and only_profit and "영업이익(억)" in res_df.columns:
+            op_num = pd.to_numeric(res_df["영업이익(억)"], errors="coerce")
+            res_df = res_df[op_num > 0].reset_index(drop=True)
+        if not res_df.empty and per_opt != "전체" and "PER" in res_df.columns:
+            limit = 15.0 if per_opt == "PER ≤ 15" else 10.0
+            per_num = pd.to_numeric(res_df["PER"], errors="coerce")
+            res_df = res_df[per_num.notna() & (per_num <= limit)].reset_index(drop=True)
 
         if res_df.empty:
             st.info(f"스캔한 {total_cnt}개 종목 중 해당 조건에 맞는 종목이 없습니다.")
