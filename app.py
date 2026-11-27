@@ -45,6 +45,14 @@ BASE_W = 0.30              # 단기 이동평균 가중치
 SIG_C0, SIG_C1 = 0.44, 0.30
 SIG_MIN, SIG_MAX = 0.25, 0.75
 
+# ── 차트 조회 기간 ──────────────────────────────────────────────────────────
+# 1년 단위로 표시 봉수를 정확히 계산한다(일봉 250·주봉 52 기준).
+PERIOD_LABELS = ["1년", "2년", "3년", "5년"]
+PERIOD_BARS = {
+    "day": {"1년": 250, "2년": 500, "3년": 750, "5년": 1250},
+    "week": {"1년": 52, "2년": 104, "3년": 156, "5년": 260},
+}
+
 INDEX_ALIASES = {
     "코스피": ("KOSPI", "코스피 지수"),
     "kospi": ("KOSPI", "코스피 지수"),
@@ -59,6 +67,58 @@ INDEX_CODES = {"KOSPI", "KOSDAQ"}
 
 def is_index(code: str) -> bool:
     return (code or "").upper() in INDEX_CODES
+
+
+def pick_x_ticks(view: pd.DataFrame, timeframe: str, n: int = 7):
+    """차트 X축(카테고리 축) 눈금.
+
+    표시 구간의 첫 봉과 마지막 봉, 그리고 그 사이 지점을 고르게 골라
+    tickvals(날짜 문자열)와 ticktext(YY.MM)를 만든다. 일봉은 월초 봉에
+    눈금을 맞춰 달 단위로 읽기 쉽게 한다.
+    """
+    dates = list(view["date_str"])
+    m = len(dates)
+    if m == 0:
+        return [], []
+
+    def label_at(i: int) -> str:
+        return pd.to_datetime(dates[i]).strftime("%y.%m")
+
+    if m <= n:
+        picked = list(range(m))
+    else:
+        picked = [0, m - 1]
+        inner = n - 2
+        if timeframe == "day" and inner > 0:
+            dts = pd.to_datetime(pd.Series(dates))
+            # 양끝 봉과 같은 달의 월초는 중간 눈금에서 제외해 라벨 중복을 막는다.
+            edge_months = {label_at(0), label_at(m - 1)}
+            starts = [
+                i for i in range(1, m - 1)
+                if dts.iloc[i].day <= 3 and label_at(i) not in edge_months
+            ]
+            if len(starts) >= inner:
+                for k in range(1, n - 1):
+                    target = k * (m - 1) / (n - 1)
+                    picked.append(min(starts, key=lambda s: abs(s - target)))
+            else:
+                picked += [int(round(k * (m - 1) / (n - 1))) for k in range(1, n - 1)]
+        else:
+            picked += [int(round(k * (m - 1) / (n - 1))) for k in range(1, n - 1)]
+        picked = sorted(set(picked))
+
+    tickvals, ticktext = [], []
+    for i in picked:
+        label = label_at(i)
+        if label in ticktext:
+            # 라벨이 겹치면 마지막 봉 눈금을 우선한다(구간 끝이 항상 보이도록).
+            if i == m - 1:
+                k = ticktext.index(label)
+                tickvals[k], ticktext[k] = dates[i], label
+            continue
+        tickvals.append(dates[i])
+        ticktext.append(label)
+    return tickvals, ticktext
 
 
 def fmt_price(v: float, index: bool = False) -> str:
@@ -101,7 +161,9 @@ def search_stock(query: str):
 
 
 @st.cache_data(ttl=600)
-def fetch_ohlcv(code: str, timeframe: str = "day", years: int = 6) -> pd.DataFrame:
+def fetch_ohlcv(code: str, timeframe: str = "day", years: int = 8) -> pd.DataFrame:
+    """일봉·주봉 OHLCV. 5년 차트에서도 650봉 장기 이동평균이 앞부분부터 계산되도록
+    기본 8년치를 받아온다."""
     end_dt = datetime.now().strftime("%Y%m%d")
     start_dt = (datetime.now() - timedelta(days=365 * years)).strftime("%Y%m%d")
     url = (
@@ -438,7 +500,6 @@ with st.sidebar:
     )
     tf_label = st.radio("봉 구분", ["일봉", "주봉"], horizontal=True)
     timeframe = "day" if tf_label == "일봉" else "week"
-    bars = st.slider("표시 봉수", min_value=120, max_value=500, value=300, step=20)
     use_log = st.checkbox("로그 스케일", value=True)
     allow_zoom = st.checkbox("차트 드래그/확대 켜기 (모바일 스크롤 시 끄기 권장)", value=False)
     st.markdown("---")
@@ -450,6 +511,14 @@ with st.sidebar:
 tab_chart, tab_scan = st.tabs(["📈 종목·지수 차트", "🔍 무릎 아래 종목 스캐너"])
 
 with tab_chart:
+    period_label = st.radio(
+        "조회 기간",
+        PERIOD_LABELS,
+        horizontal=True,
+        index=0,
+        help="선택한 기간만큼의 일봉·주봉을 차트에 표시합니다(일봉 1년=250봉, 주봉 1년=52봉).",
+    )
+    bars = PERIOD_BARS[timeframe][period_label]
     q_now = st.session_state["selected_query"].strip()
     if q_now:
         code, name = search_stock(q_now)
@@ -463,6 +532,10 @@ with tab_chart:
             else:
                 df = compute_indicators(raw_df, timeframe)
                 view = df.tail(bars).reset_index(drop=True)
+                st.caption(
+                    f"차트 표시 구간: {view['date_str'].iloc[0]} ~ {view['date_str'].iloc[-1]} "
+                    f"· {len(view):,}봉 ({period_label}, {tf_label})"
+                )
                 last = view.iloc[-1]
                 prev = view.iloc[-2] if len(view) >= 2 else last
                 chg = (last["close"] - prev["close"]) / prev["close"] * 100.0
@@ -594,7 +667,15 @@ with tab_chart:
                     row=1, col=1,
                 )
                 fig.update_yaxes(range=[0, 100], row=2, col=1)
-                fig.update_xaxes(type="category", nticks=8, row=3, col=1)
+
+                # X축 눈금: 표시 구간 시작~끝을 고르게 7개 지점으로 직접 지정
+                tickvals, ticktext = pick_x_ticks(view, timeframe)
+                fig.update_xaxes(
+                    type="category",
+                    tickmode="array",
+                    tickvals=tickvals,
+                    ticktext=ticktext,
+                )
 
                 st.plotly_chart(
                     fig,
