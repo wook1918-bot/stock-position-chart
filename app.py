@@ -16,23 +16,68 @@ st.set_page_config(
 )
 
 st.title("📊 주가위치분석시스템 차트 (KRX)")
-st.caption("종목 검색 차트(신호 마커 포함)와 '무릎(파랑) 아래' 저위치 종목 스캐너를 제공합니다.")
+st.caption(
+    "종목·지수 검색 차트(신호 마커 포함)와 '무릎(파랑) 아래' 저위치 종목 스캐너를 제공합니다. "
+    "기준선은 고가 120일·650일 이동평균을 혼합(0.3/0.7)한 값이며, 단계는 댕기왕자 블로그 차트 대조로 "
+    "역산한 비율(발목 0.20 ~ 상투 4.16)을 씁니다."
+)
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-BANDS_SPEC = [
-    ("바닥(빨강)", -1.10, "#d62828", 1.6),
-    ("무릎(파랑)", 0.00, "#0000ff", 2.2),
-    ("허벅지(주황)", 0.82, "#ff6600", 2.2),
-    ("허리(검정)", 1.66, "#000000", 2.6),
-    ("어깨(초록)", 2.25, "#008f32", 2.2),
-    ("상투(빨강)", 2.85, "#ff0000", 2.2),
+# ── 단계 정의 ───────────────────────────────────────────────────────────────
+# 댕기왕자 블로그 차트 34개 지점(12종목) 대조로 역산한 계수.
+# 중심선(무릎)에서 변동성 s배 만큼 exp(z*s) 만큼 떨어진 위치.
+BAND_Z = [
+    ("발목(보라)", -1.62, "#7a3fa8", 1.4, "dot"),
+    ("바닥(빨강)", -1.10, "#d62828", 1.6, "solid"),
+    ("무릎(파랑)", 0.00, "#0000ff", 2.4, "solid"),
+    ("허벅지(주황)", 0.82, "#ff6600", 2.2, "solid"),
+    ("허리(검정)", 1.66, "#000000", 2.4, "solid"),
+    ("어깨(초록)", 2.25, "#008f32", 2.2, "solid"),
+    ("상투(빨강)", 2.85, "#ff0000", 2.4, "solid"),
 ]
+BAND_NAMES = [b[0] for b in BAND_Z]
+PRICE_BANDS = ["바닥(빨강)", "무릎(파랑)", "허벅지(주황)", "허리(검정)", "어깨(초록)", "상투(빨강)"]
+
+BASE_SCALE = 1.05          # 기준선 보정 계수
+BASE_SHORT, BASE_LONG = 120, 650
+BASE_W = 0.30              # 단기 이동평균 가중치
+SIG_C0, SIG_C1 = 0.44, 0.30
+SIG_MIN, SIG_MAX = 0.25, 0.75
+
+INDEX_ALIASES = {
+    "코스피": ("KOSPI", "코스피 지수"),
+    "kospi": ("KOSPI", "코스피 지수"),
+    "코스피지수": ("KOSPI", "코스피 지수"),
+    "종합주가지수": ("KOSPI", "코스피 지수"),
+    "코스닥": ("KOSDAQ", "코스닥 지수"),
+    "kosdaq": ("KOSDAQ", "코스닥 지수"),
+    "코스닥지수": ("KOSDAQ", "코스닥 지수"),
+}
+INDEX_CODES = {"KOSPI", "KOSDAQ"}
+
+
+def is_index(code: str) -> bool:
+    return (code or "").upper() in INDEX_CODES
+
+
+def fmt_price(v: float, index: bool = False) -> str:
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "-"
+    return f"{v:,.2f}p" if index else f"{int(round(v)):,}원"
 
 
 @st.cache_data(ttl=3600)
 def search_stock(query: str):
-    q = query.strip()
+    """종목명·종목코드·지수명을 (코드, 표시명)으로 변환."""
+    q = (query or "").strip()
+    if not q:
+        return None, None
+
+    key = q.replace(" ", "").lower()
+    if key in INDEX_ALIASES:
+        return INDEX_ALIASES[key]
+
     if re.fullmatch(r"\d{6}", q):
         url = f"https://ac.stock.naver.com/ac?q={urllib.parse.quote(q)}&target=stock"
         r = requests.get(url, headers=HEADERS, timeout=10).json()
@@ -78,6 +123,12 @@ def fetch_ohlcv(code: str, timeframe: str = "day", years: int = 6) -> pd.DataFra
 
 
 def compute_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """주가위치 밴드 계산.
+
+    기준선(무릎) = 1.05 × (고가 120봉 평균)^0.30 × (고가 650봉 평균)^0.70
+    단계 = 기준선 × exp(z × s),  s = clip(0.44 + 0.30×(연변동성-0.5), 0.25, 0.75)
+    (주봉은 봉 수를 1/5로 환산: 24/130봉, 변동성 52봉)
+    """
     df = df.copy()
     for n in [5, 20, 40, 50, 60, 120]:
         df[f"sma_{n}"] = df["close"].rolling(n).mean()
@@ -89,18 +140,26 @@ def compute_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     df["slow_k"] = pd.Series(fast_k).rolling(5).mean()
     df["slow_d"] = df["slow_k"].rolling(5).mean()
 
-    n_band = 260 if timeframe == "day" else 60
-    n_vol = 250 if timeframe == "day" else 52
-    ann_factor = np.sqrt(250) if timeframe == "day" else np.sqrt(52)
+    short_n = BASE_SHORT if timeframe == "day" else max(6, BASE_SHORT // 5)
+    long_n = BASE_LONG if timeframe == "day" else max(30, BASE_LONG // 5)
+    vol_n = 250 if timeframe == "day" else 52
+    ann_factor = np.sqrt(vol_n)
+
+    hi = df["high"]
+    ma_short = hi.rolling(short_n, min_periods=max(10, short_n // 3)).mean()
+    ma_long = hi.rolling(long_n, min_periods=max(40, long_n // 5)).mean()
+    ma_long = ma_long.fillna(ma_short)
+    ma_short = ma_short.fillna(ma_long)
+    base = BASE_SCALE * np.exp(BASE_W * np.log(ma_short) + (1 - BASE_W) * np.log(ma_long))
 
     log_c = np.log(df["close"].replace(0, np.nan))
-    gma = np.exp(log_c.ewm(span=n_band, adjust=False).mean())
-    ann_vol = (log_c.diff().rolling(n_vol).std() * ann_factor).fillna(0.55)
-    eff_sig = np.clip(0.30 + 0.25 * ann_vol, 0.35, 0.58)
+    ann_vol = (log_c.diff().rolling(vol_n).std() * ann_factor).fillna(0.5)
+    sig = (SIG_C0 + SIG_C1 * (ann_vol - 0.5)).clip(SIG_MIN, SIG_MAX)
 
-    for name, z, _, _ in BANDS_SPEC:
-        df[name] = gma * np.exp(z * eff_sig)
-
+    df["기준선"] = base
+    for name, z, _, _, _ in BAND_Z:
+        df[name] = base * np.exp(z * sig)
+    df["변동성"] = ann_vol
     return df
 
 
@@ -126,7 +185,7 @@ def fetch_top_market_stocks(market: str = "ALL", pages_per_market: int = 2):
 def analyze_single_stock(item):
     code, name, m_name = item
     try:
-        df = fetch_ohlcv(code, "day", years=3)
+        df = fetch_ohlcv(code, "day", years=4)
         if df.empty or len(df) < 320:
             return None
         df = compute_indicators(df, "day")
@@ -187,9 +246,9 @@ def set_selected_stock(stock_name: str):
 with st.sidebar:
     st.header("조회 설정")
     query = st.text_input(
-        "종목명 또는 종목코드",
+        "종목명·종목코드·지수",
         key="selected_query",
-        placeholder="예: 삼성전자, 신세계, 004170",
+        placeholder="예: 삼성전자, 신세계, 004170, 코스피, 코스닥",
     )
     tf_label = st.radio("봉 구분", ["일봉", "주봉"], horizontal=True)
     timeframe = "day" if tf_label == "일봉" else "week"
@@ -197,17 +256,21 @@ with st.sidebar:
     use_log = st.checkbox("로그 스케일", value=True)
     allow_zoom = st.checkbox("차트 드래그/확대 켜기 (모바일 스크롤 시 끄기 권장)", value=False)
     st.markdown("---")
-    st.caption("※ 본 차트와 스캐너는 공개된 블로그 차트 패턴을 역산·재현한 참고용 지표이며 투자 권유가 아닙니다.")
+    st.caption(
+        "※ 본 차트와 스캐너는 공개된 블로그 차트 패턴을 역산·재현한 참고용 지표이며 투자 권유가 아닙니다. "
+        "댕기왕자 블로그 차트 34개 지점 대조 기준 평균 절대오차 약 7.4%, 중앙값 3.8%."
+    )
 
-tab_chart, tab_scan = st.tabs(["📈 종목 차트", "🔍 무릎 아래 종목 스캐너"])
+tab_chart, tab_scan = st.tabs(["📈 종목·지수 차트", "🔍 무릎 아래 종목 스캐너"])
 
 with tab_chart:
     q_now = st.session_state["selected_query"].strip()
     if q_now:
         code, name = search_stock(q_now)
         if not code:
-            st.error(f"'{q_now}'에 해당하는 국내 상장 종목을 찾지 못했습니다.")
+            st.error(f"'{q_now}'에 해당하는 국내 상장 종목·지수를 찾지 못했습니다. (지수는 '코스피', '코스닥'으로 입력)")
         else:
+            idx_flag = is_index(code)
             raw_df = fetch_ohlcv(code, timeframe)
             if raw_df.empty or len(raw_df) < 60:
                 st.warning(f"{name}({code})의 주가 데이터가 충분하지 않습니다.")
@@ -219,13 +282,13 @@ with tab_chart:
                 chg = (last["close"] - prev["close"]) / prev["close"] * 100.0
 
                 cur_p = last["close"]
-                zone = "바닥(빨강) 이하"
-                for b_name, _, _, _ in BANDS_SPEC:
+                zone = "발목(보라) 이하"
+                for b_name, _, _, _, _ in BAND_Z:
                     if pd.notna(last[b_name]) and cur_p >= last[b_name]:
                         zone = f"{b_name} 이상"
 
                 c1, c2, c3 = st.columns(3)
-                c1.metric(f"{name} ({code})", f"{int(cur_p):,}원", f"{chg:+.2f}%")
+                c1.metric(f"{name} ({code})", fmt_price(cur_p, idx_flag), f"{chg:+.2f}%")
                 c2.metric("현재 추정 위치", zone)
                 c3.metric("기준일", last["date_str"])
 
@@ -249,11 +312,11 @@ with tab_chart:
                     row=1, col=1,
                 )
 
-                for b_name, _, col, lw in BANDS_SPEC:
+                for b_name, _, col, lw, dash in BAND_Z:
                     fig.add_trace(
                         go.Scatter(
                             x=view["date_str"], y=view[b_name],
-                            mode="lines", line=dict(color=col, width=lw),
+                            mode="lines", line=dict(color=col, width=lw, dash=dash),
                             name=b_name,
                         ),
                         row=1, col=1,
@@ -313,7 +376,7 @@ with tab_chart:
                     fig.update_xaxes(fixedrange=True)
                     fig.update_yaxes(fixedrange=True)
                 if use_log:
-                    y_min = float(min(view["low"].min(), view["바닥(빨강)"].min())) * 0.9
+                    y_min = float(min(view["low"].min(), view["발목(보라)"].min())) * 0.9
                     y_max = float(max(view["high"].max(), view["상투(빨강)"].max())) * 1.1
                     cand_ticks = []
                     for exp in range(2, 8):
@@ -339,7 +402,7 @@ with tab_chart:
                     )
                 fig.add_hline(
                     y=cur_p, line_dash="dot", line_color="#d62828", line_width=1,
-                    annotation_text=f" {int(cur_p):,}원",
+                    annotation_text=f" {fmt_price(cur_p, idx_flag)}",
                     annotation_position="right",
                     annotation_font_color="#d62828",
                     row=1, col=1,
@@ -356,16 +419,21 @@ with tab_chart:
                 st.markdown('<div id="price-table"></div>', unsafe_allow_html=True)
                 st.subheader("단계별 가격표 (최신 기준)")
                 table_rows = []
-                for b_name, _, _, _ in reversed(BANDS_SPEC):
+                for b_name, _, _, _, _ in reversed(BAND_Z):
                     val = last[b_name]
                     if pd.notna(val):
                         diff_pct = (val - cur_p) / cur_p * 100.0
                         table_rows.append({
                             "구간": b_name,
-                            "가격": f"{int(val):,}원",
+                            "가격": fmt_price(val, idx_flag),
                             "현재가 대비": f"{diff_pct:+.1f}%",
                         })
                 st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+                st.caption(
+                    f"연변동성 {last['변동성']:.0%} · 기준선 {fmt_price(last['기준선'], idx_flag)} · "
+                    f"단계 폭 s={float((SIG_C0 + SIG_C1 * (last['변동성'] - 0.5))):.2f} "
+                    f"(허리·어깨·상투는 기준선의 약 2.07·2.74·4.16배)"
+                )
 
 with tab_scan:
     st.subheader("🔍 현재가 ≤ 무릎(파랑) 종목 스캐너 (일봉 기준)")
